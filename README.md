@@ -140,3 +140,4 @@ After the session ends, open the companion UI in the WebView or browser and expo
 - The glasses have no speaker, so all confirmations are visual.
 - `public/protocol.json` ships with a generic 5-step placeholder protocol you can replace safely.
 - If you test on a real phone and backend host is not `localhost`, update `VITE_API_BASE_URL` and add your local backend host to the `network` whitelist in `app.json`.
+# ProtoScribe
