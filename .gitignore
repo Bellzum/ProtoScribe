@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env.local
+backend/.env
+backend/storage/exports/
+backend/storage/sessions/
+backend/storage/active-session.json

@@ -1,0 +1,26 @@
+{
+  "package_id": "com.protoscribe.app",
+  "edition": "202601",
+  "name": "ProtoScribe",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "tagline": "Hands-free protocol guide for BSL-3 researchers",
+  "description": "Voice-first protocol guidance and timestamped lab-note capture for Even Realities G2 smart glasses.",
+  "author": "TRAE",
+  "entrypoint": "index.html",
+  "permissions": [
+    { "name": "g2-microphone", "desc": "Capture audio from the glasses mic for voice commands and note transcription." },
+    {
+      "name": "network",
+      "desc": "Connect to the local ProtoScribe backend and optional cloud STT services.",
+      "whitelist": [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "https://api.deepgram.com",
+        "https://api.assemblyai.com"
+      ]
+    }
+  ],
+  "supported_languages": ["en"]
+}
