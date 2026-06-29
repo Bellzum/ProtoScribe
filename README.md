@@ -39,7 +39,7 @@ cp .env.example .env.local
 npm install
 ```
 
-Recommended local fallback during development:
+Recommended first device test during development:
 
 ```env
 VITE_API_BASE_URL=http://localhost:8000
@@ -47,7 +47,7 @@ VITE_STT_PROVIDER=browser
 VITE_STT_LANGUAGE=en-US
 ```
 
-If you want privacy-first local transcription, set:
+If you want to use your OpenAI API key for backend transcription, set:
 
 ```env
 VITE_STT_PROVIDER=whisper
@@ -63,15 +63,18 @@ cp backend/.env.example backend/.env
 uvicorn backend.main:app --reload --port 8000
 ```
 
-Default local Whisper-compatible backend configuration:
+Default OpenAI Whisper backend configuration:
 
 ```env
 STT_PROVIDER=whisper
-WHISPER_API_URL=http://127.0.0.1:8001/v1/audio/transcriptions
+WHISPER_API_URL=https://api.openai.com/v1/audio/transcriptions
 WHISPER_MODEL=whisper-1
+WHISPER_API_KEY=your_openai_api_key_here
 ```
 
-For hosted providers, set `STT_PROVIDER=deepgram` or `STT_PROVIDER=assemblyai` and add the matching API key in `backend/.env`.
+If you run a local OpenAI-compatible Whisper server instead, point `WHISPER_API_URL` at that server.
+
+If you use another hosted provider, set `STT_PROVIDER=deepgram` or `STT_PROVIDER=assemblyai` and add the matching API key in `backend/.env`.
 
 ## Run and test
 

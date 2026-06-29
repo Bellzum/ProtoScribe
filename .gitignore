@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.ehpk
 .DS_Store
 .venv/
 __pycache__/

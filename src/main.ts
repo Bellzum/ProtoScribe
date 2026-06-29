@@ -1,49 +1,52 @@
-import { startSttStream, type SttSnapshot } from './asr/stt'
 import {
-  endSession,
-  getActiveSession,
-  getSession,
-  listSessions,
-  loadProtocol,
-  recordStepEvent,
-  saveObservation,
-  startSession,
-} from './lib/api'
+  CreateStartUpPageContainer,
+  OsEventTypeList,
+  TextContainerProperty,
+  TextContainerUpgrade,
+  waitForEvenAppBridge,
+} from '@evenrealities/even_hub_sdk'
+
+import { startSttStream, type SttClient } from './asr/stt'
 import { describeCommand, parseVoiceCommand } from './lib/commands'
-import { formatProviderLabel, STT_PROVIDER } from './lib/config'
-import { GlassesDisplay, isDoubleTap, isSystemExit } from './lib/glasses'
 import type { AppState, ObservationRecord, ProtocolStep, SessionRecord, StatusKind, VoiceCommand } from './lib/types'
+import protocol from './protocol.json'
 import { mountUi, renderUi, setTranscript } from './ui'
 
-const API_KEY = (import.meta.env.VITE_STT_API_KEY as string | undefined) ?? ''
-const ACTIVE_SESSION_KEY = 'protoscribe.activeSessionId'
+const ACTIVE_SESSION_KEY = 'protoscribe.session'
+const GLASSES_CONTAINER_ID = 1
+const GLASSES_CONTAINER_NAME = 'main'
+
+function createDefaultSession(): SessionRecord {
+  return {
+    active: false,
+    currentStepIndex: 1,
+    observations: [],
+    startedAt: null,
+    endedAt: null,
+  }
+}
 
 const state: AppState = {
-  protocol: null,
-  currentSession: null,
-  recentSessions: [],
-  selectedSession: null,
-  selectedSessionId: null,
-  confirmationRequired: false,
+  protocol,
+  currentSession: createDefaultSession(),
   lastTranscript: '',
   lastCommand: 'awaiting command',
   statusKind: 'connecting',
   statusText: 'Preparing Even Hub bridge and microphone…',
-  providerLabel: formatProviderLabel(STT_PROVIDER),
+  providerLabel: 'Deepgram · G2 mic',
 }
 
-let display: GlassesDisplay | null = null
-let stt: ReturnType<typeof startSttStream> | null = null
+let bridge: Awaited<ReturnType<typeof waitForEvenAppBridge>> | null = null
+let sttClient: SttClient | null = null
 let cleanedUp = false
 let notePreviewTimer: number | null = null
-let showingLastNote = false
+let renderTimer: number | null = null
+let pendingGlassesContent = ''
+let lastGlassesContent = ''
+let overlayMode: 'none' | 'last-note' | 'summary' = 'none'
 
 function currentStep() {
-  if (!state.protocol) {
-    return null
-  }
-
-  const stepIndex = state.currentSession?.current_step_index ?? 1
+  const stepIndex = state.currentSession.currentStepIndex
   return state.protocol.steps.find(step => step.index === stepIndex) ?? state.protocol.steps[0]
 }
 
@@ -52,71 +55,198 @@ function getLatestObservation() {
   return notes[notes.length - 1] ?? null
 }
 
+function truncateText(text: string, maxLength: number) {
+  if (text.length <= maxLength) {
+    return text
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 1))}...`
+}
+
+function wrapLine(text: string, width = 30) {
+  const words = text.trim().split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let current = ''
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word
+    if (candidate.length > width && current) {
+      lines.push(current)
+      current = word
+    } else {
+      current = candidate
+    }
+  }
+
+  if (current) {
+    lines.push(current)
+  }
+
+  return lines
+}
+
+function glassesText() {
+  const step = currentStep()
+  const totalSteps = state.protocol.steps.length
+
+  if (!step) {
+    return [
+      'PROTOSCRIBE  BSL-3',
+      'Ready',
+      '',
+      'Loading protocol...',
+      '',
+      'Say: start session',
+    ].join('\n')
+  }
+
+  const lines = [
+    'PROTOSCRIBE  BSL-3',
+    `Step ${step.index}/${totalSteps}`,
+    truncateText(step.title.toUpperCase(), 30),
+    '',
+    ...wrapLine(step.action, 30).slice(0, 5),
+    '',
+    'Say: next / back / note',
+  ]
+
+  return truncateText(lines.join('\n'), 480)
+}
+
+async function renderGlassesNow(content: string) {
+  if (!bridge) {
+    return
+  }
+
+  if (!content || content === lastGlassesContent) {
+    return
+  }
+
+  lastGlassesContent = content
+  await bridge.textContainerUpgrade(
+    new TextContainerUpgrade({
+      containerID: GLASSES_CONTAINER_ID,
+      containerName: GLASSES_CONTAINER_NAME,
+      content,
+    }),
+  )
+}
+
+function renderGlasses() {
+  pendingGlassesContent = glassesText()
+  if (renderTimer !== null) {
+    return
+  }
+
+  renderTimer = window.setTimeout(() => {
+    renderTimer = null
+    void renderGlassesNow(pendingGlassesContent)
+  }, 120)
+}
+
+function renderLastNotePreview() {
+  const note = getLatestObservation()
+  if (!note) {
+    return [
+      'LAST NOTE',
+      '',
+      'No saved note yet.',
+      '',
+      'Say: note <speech>',
+    ].join('\n')
+  }
+
+  return truncateText(
+    [
+      'LAST NOTE',
+      `Step ${note.stepIndex}`,
+      '',
+      ...wrapLine(note.transcript, 30).slice(0, 5),
+    ].join('\n'),
+    480,
+  )
+}
+
+function renderSummaryText() {
+  return truncateText(
+    [
+      'SESSION COMPLETE',
+      `Steps reached ${state.currentSession.currentStepIndex}/${state.protocol.steps.length}`,
+      `Notes saved ${state.currentSession.observations.length}`,
+      '',
+      state.currentSession.startedAt ? `Started ${new Date(state.currentSession.startedAt).toLocaleTimeString()}` : '',
+      state.currentSession.endedAt ? `Ended ${new Date(state.currentSession.endedAt).toLocaleTimeString()}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    480,
+  )
+}
+
+function flashSavedNote(transcript: string, stepIndex: number) {
+  const lines = [
+    'NOTE SAVED',
+    `Step ${stepIndex}`,
+    '',
+    ...wrapLine(transcript, 30).slice(0, 5),
+  ]
+  void renderGlassesNow(truncateText(lines.join('\n'), 480))
+
+  if (notePreviewTimer !== null) {
+    window.clearTimeout(notePreviewTimer)
+  }
+
+  notePreviewTimer = window.setTimeout(() => {
+    notePreviewTimer = null
+    overlayMode = 'none'
+    render()
+  }, 2000)
+}
+
 function updateStatus(kind: StatusKind, text: string) {
   state.statusKind = kind
   state.statusText = text
   render()
 }
 
-function syncSession(session: SessionRecord | null) {
-  state.currentSession = session
-  if (session) {
-    state.confirmationRequired = session.confirmation_required
-    state.selectedSession = session
-    state.selectedSessionId = session.session_id
-    void persistLocalState(session.session_id)
-  } else {
-    void persistLocalState('')
-  }
-}
+async function persistSessionState() {
+  const serialized = JSON.stringify(state.currentSession)
 
-function render() {
-  renderUi(state)
-
-  if (!display || !state.protocol) {
-    return
-  }
-
-  if (showingLastNote) {
-    display.render({
-      mode: 'note',
-      protocol: state.protocol,
-      session: state.currentSession,
-      statusText: state.statusText,
-      providerLabel: state.providerLabel,
-      lastCommand: state.lastCommand,
-      notePreview: getLatestObservation(),
-    })
-    return
-  }
-
-  display.render({
-    mode: state.currentSession?.status === 'ended' ? 'ended' : state.currentSession ? 'step' : 'startup',
-    protocol: state.protocol,
-    session: state.currentSession,
-    statusText: state.statusText,
-    providerLabel: state.providerLabel,
-    lastCommand: state.lastCommand,
-  })
-}
-
-async function persistLocalState(sessionId: string) {
   try {
-    const bridge = display?.getBridge()
     if (bridge) {
-      await bridge.setLocalStorage(ACTIVE_SESSION_KEY, sessionId)
+      await bridge.setLocalStorage(ACTIVE_SESSION_KEY, serialized)
       return
     }
   } catch (error) {
     console.warn('Bridge local storage unavailable:', error)
   }
 
-  window.localStorage.setItem(ACTIVE_SESSION_KEY, sessionId)
+  window.localStorage.setItem(ACTIVE_SESSION_KEY, serialized)
 }
 
-async function getStoredSessionId() {
+function render() {
+  renderUi(state)
+
+  if (!bridge) {
+    return
+  }
+
+  if (overlayMode === 'last-note') {
+    pendingGlassesContent = renderLastNotePreview()
+    void renderGlassesNow(pendingGlassesContent)
+    return
+  }
+
+  if (overlayMode === 'summary') {
+    pendingGlassesContent = renderSummaryText()
+    void renderGlassesNow(pendingGlassesContent)
+    return
+  }
+
+  renderGlasses()
+}
+
+async function readStoredSession() {
   try {
-    const bridge = display?.getBridge()
     if (bridge) {
       return await bridge.getLocalStorage(ACTIVE_SESSION_KEY)
     }
@@ -127,50 +257,48 @@ async function getStoredSessionId() {
   return window.localStorage.getItem(ACTIVE_SESSION_KEY) ?? ''
 }
 
-async function refreshSessions() {
-  const sessions = await listSessions()
-  state.recentSessions = sessions
-
-  if (state.selectedSessionId) {
-    try {
-      state.selectedSession = await getSession(state.selectedSessionId)
-    } catch {
-      state.selectedSession = sessions[0] ?? null
-      state.selectedSessionId = state.selectedSession?.session_id ?? null
-    }
-  } else {
-    state.selectedSession = sessions[0] ?? null
-    state.selectedSessionId = state.selectedSession?.session_id ?? null
-  }
-
+async function saveAndRender() {
+  await persistSessionState()
   render()
 }
 
-async function navigateToStep(step: ProtocolStep, eventType: 'entered' | 'repeated', detail?: string) {
-  if (!state.currentSession) {
+async function restoreSessionState() {
+  const stored = await readStoredSession()
+  if (!stored) {
+    return
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Partial<SessionRecord>
+    state.currentSession = {
+      active: parsed.active ?? false,
+      currentStepIndex: parsed.currentStepIndex ?? 1,
+      observations: Array.isArray(parsed.observations) ? parsed.observations : [],
+      startedAt: parsed.startedAt ?? null,
+      endedAt: parsed.endedAt ?? null,
+    }
+    overlayMode = state.currentSession.active ? 'none' : state.currentSession.endedAt ? 'summary' : 'none'
+  } catch (error) {
+    console.warn('Failed to restore local session state:', error)
+    state.currentSession = createDefaultSession()
+  }
+}
+
+async function navigateToStep(step: ProtocolStep) {
+  if (!state.currentSession.active) {
     updateStatus('warning', 'No active session. Say "start session" first.')
     return
   }
 
-  state.currentSession = await recordStepEvent(state.currentSession.session_id, {
-    step_index: step.index,
-    step_title: step.title,
-    event_type: eventType,
-    detail,
-  })
-  state.lastCommand = `${eventType === 'entered' ? 'step' : 'repeat'} ${step.index}`
-  await refreshSessions()
+  state.currentSession.currentStepIndex = step.index
+  overlayMode = 'none'
+  state.lastCommand = `step ${step.index}`
+  await saveAndRender()
   updateStatus('listening', `Showing step ${step.index} · ${step.title}`)
 }
 
-function isCurrentStepConfirmed(session: SessionRecord) {
-  return session.step_events.some(
-    event => event.step_index === session.current_step_index && event.event_type === 'completed',
-  )
-}
-
 async function advanceStep(direction: 1 | -1, detail: string) {
-  if (!state.currentSession || !state.protocol) {
+  if (!state.currentSession.active) {
     updateStatus('warning', 'No active session. Say "start session" first.')
     return
   }
@@ -180,14 +308,9 @@ async function advanceStep(direction: 1 | -1, detail: string) {
     return
   }
 
-  if (direction === 1 && state.currentSession.confirmation_required && !isCurrentStepConfirmed(state.currentSession)) {
-    updateStatus('warning', 'Confirmation mode is on. Say "done" before moving to the next step.')
-    return
-  }
-
   const nextIndex = Math.min(
     state.protocol.steps.length,
-    Math.max(1, state.currentSession.current_step_index + direction),
+    Math.max(1, state.currentSession.currentStepIndex + direction),
   )
   const nextStep = state.protocol.steps.find(step => step.index === nextIndex)
   if (!nextStep) {
@@ -204,76 +327,35 @@ async function advanceStep(direction: 1 | -1, detail: string) {
     return
   }
 
-  await navigateToStep(nextStep, 'entered', detail)
-}
-
-async function confirmCurrentStep() {
-  const session = state.currentSession
-  const step = currentStep()
-  if (!session || !step) {
-    updateStatus('warning', 'There is no active step to confirm.')
-    return
-  }
-
-  state.currentSession = await recordStepEvent(session.session_id, {
-    step_index: step.index,
-    step_title: step.title,
-    event_type: 'completed',
-    detail: 'spoken confirmation',
-  })
-  state.lastCommand = `confirmed step ${step.index}`
-  await refreshSessions()
-  updateStatus('listening', `Step ${step.index} marked complete.`)
-}
-
-async function flagCurrentStep(flagText: string) {
-  const session = state.currentSession
-  const step = currentStep()
-  if (!session || !step) {
-    updateStatus('warning', 'There is no active step to flag.')
-    return
-  }
-
-  state.currentSession = await recordStepEvent(session.session_id, {
-    step_index: step.index,
-    step_title: step.title,
-    event_type: 'flagged',
-    detail: flagText,
-  })
-  state.lastCommand = `flagged step ${step.index}`
-  await refreshSessions()
-  updateStatus('warning', `Step ${step.index} flagged: ${flagText}`)
+  await navigateToStep(nextStep)
+  state.lastCommand = detail
 }
 
 async function saveNote(noteText: string) {
-  const session = state.currentSession
   const step = currentStep()
-  if (!session || !step) {
+  if (!state.currentSession.active || !step) {
     updateStatus('warning', 'Start a session before recording observations.')
     return
   }
 
-  state.currentSession = await saveObservation(session.session_id, {
-    step_index: step.index,
-    step_title: step.title,
+  const note: ObservationRecord = {
+    timestamp: new Date().toISOString(),
+    stepIndex: step.index,
+    stepTitle: step.title,
     transcript: noteText,
-  })
+  }
+
+  state.currentSession.observations.push(note)
   state.lastCommand = `note saved on step ${step.index}`
-  await refreshSessions()
-  display?.flashNoteSaved(step.index)
+  overlayMode = 'none'
+  await persistSessionState()
+  flashSavedNote(noteText, step.index)
   updateStatus('listening', `Observation saved for step ${step.index}.`)
 }
 
-function showLastNote(_note: ObservationRecord | null) {
-  showingLastNote = true
+function showLastNote() {
+  overlayMode = 'last-note'
   render()
-  if (notePreviewTimer !== null) {
-    window.clearTimeout(notePreviewTimer)
-  }
-  notePreviewTimer = window.setTimeout(() => {
-    showingLastNote = false
-    render()
-  }, 2200)
 }
 
 async function handleCommand(command: VoiceCommand) {
@@ -282,25 +364,32 @@ async function handleCommand(command: VoiceCommand) {
 
   switch (command.kind) {
     case 'start_session': {
-      if (state.currentSession?.status === 'active') {
+      if (state.currentSession.active) {
         updateStatus('warning', 'A session is already active.')
         return
       }
-      const session = await startSession(state.confirmationRequired)
-      syncSession(session)
-      await refreshSessions()
+      state.currentSession = {
+        active: true,
+        currentStepIndex: 1,
+        observations: [],
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+      }
+      overlayMode = 'none'
+      await saveAndRender()
       updateStatus('listening', 'Session started. Step 1 is live on the glasses.')
       return
     }
     case 'end_session': {
-      if (!state.currentSession?.session_id) {
+      if (!state.currentSession.active) {
         updateStatus('warning', 'There is no active session to end.')
         return
       }
-      const session = await endSession(state.currentSession.session_id)
-      syncSession(session)
-      await refreshSessions()
-      updateStatus('idle', 'Session ended. Review and export are ready.')
+      state.currentSession.active = false
+      state.currentSession.endedAt = new Date().toISOString()
+      overlayMode = 'summary'
+      await saveAndRender()
+      updateStatus('idle', 'Session ended. Summary is shown on the glasses.')
       return
     }
     case 'next':
@@ -314,124 +403,147 @@ async function handleCommand(command: VoiceCommand) {
       if (!step) {
         return
       }
-      await navigateToStep(step, 'repeated', 'voice repeat')
+      overlayMode = 'none'
+      state.lastCommand = 'repeat step'
+      await saveAndRender()
+      updateStatus('listening', `Repeated step ${step.index}.`)
       return
     }
     case 'goto': {
-      if (!state.protocol) {
-        return
-      }
       const step = state.protocol.steps.find(item => item.index === command.stepNumber)
       if (!step) {
         updateStatus('warning', `Step ${command.stepNumber ?? '?'} is not in this protocol.`)
         return
       }
-      await navigateToStep(step, 'entered', 'voice go to')
+      await navigateToStep(step)
+      state.lastCommand = `go to step ${step.index}`
       return
     }
     case 'note':
       await saveNote(command.noteText ?? '')
       return
     case 'read_last_note':
-      showLastNote(getLatestObservation())
+      showLastNote()
       updateStatus('listening', 'Showing the latest saved note on the glasses.')
-      return
-    case 'confirm':
-      await confirmCurrentStep()
-      return
-    case 'flag':
-      await flagCurrentStep(command.flagText ?? 'flagged')
       return
     default:
       updateStatus('warning', `Ignored: "${command.rawText}"`)
   }
 }
 
-async function restoreSessionState() {
-  const active = await getActiveSession()
-  if (active) {
-    syncSession(active)
-    state.selectedSession = active
-    state.selectedSessionId = active.session_id
-    updateStatus('listening', 'Recovered active session from background state.')
-    return
-  }
+// ── Voice: stream the G2 mic to the offline Vosk recognizer, route FINAL
+// transcripts to commands. No API key — runs on-device.
+function startVoice(): SttClient {
+  return startSttStream(
+    snap => {
+      const interim = snap.interimText.trim()
+      const final = snap.finalText.trim()
 
-  const storedSessionId = await getStoredSessionId()
-  if (storedSessionId) {
-    try {
-      const session = await getSession(storedSessionId)
-      state.selectedSession = session
-      state.selectedSessionId = session.session_id
-    } catch {
-      state.selectedSession = null
-      state.selectedSessionId = null
-    }
-  }
+      if (interim) {
+        // Mirror the unstable tail to the phone UI only; don't act on it.
+        setTranscript(interim, 'Listening…')
+        return
+      }
+
+      if (final) {
+        const transcript = final.toLowerCase().trim()
+        state.lastTranscript = transcript
+        setTranscript(transcript, 'Recognizer active')
+        const command = parseVoiceCommand(transcript)
+        void handleCommand(command)
+      }
+
+      if (snap.finished) {
+        setTranscript('', 'Recognizer stopped')
+      }
+    },
+    err => {
+      updateStatus('error', `Speech recognition error: ${(err as Error)?.message ?? String(err)}`)
+    },
+  )
 }
 
 async function bootstrap() {
   mountUi({
     onStartSession: () => void handleCommand({ kind: 'start_session', rawText: 'start session' }),
     onEndSession: () => void handleCommand({ kind: 'end_session', rawText: 'end session' }),
-    onRefreshSessions: () => void refreshSessions(),
-    onSelectSession: sessionId => {
-      state.selectedSessionId = sessionId
-      void refreshSessions()
-    },
-    onToggleConfirmation: enabled => {
-      state.confirmationRequired = enabled
-      render()
-    },
     onRepeatCurrentStep: () => void handleCommand({ kind: 'repeat', rawText: 'repeat' }),
   })
 
   render()
 
   try {
-    state.protocol = await loadProtocol()
-    display = await GlassesDisplay.create()
-    await restoreSessionState()
-    await refreshSessions()
+    bridge = await waitForEvenAppBridge()
 
-    stt = startSttStream(
-      API_KEY,
-      async (snapshot: SttSnapshot) => {
-        setTranscript(snapshot.finalText, snapshot.interimText)
-        if (snapshot.finalText) {
-          state.lastTranscript = snapshot.finalText
-        }
-        render()
+    const mainText = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 0,
+      width: 576,
+      height: 288,
+      borderWidth: 0,
+      borderColor: 5,
+      paddingLength: 4,
+      containerID: GLASSES_CONTAINER_ID,
+      containerName: GLASSES_CONTAINER_NAME,
+      content: glassesText(),
+      isEventCapture: 1,
+    })
 
-        if (snapshot.finished && snapshot.finalText.trim()) {
-          const command = parseVoiceCommand(snapshot.finalText)
-          await handleCommand(command)
-        }
-      },
-      error => {
-        console.error('STT error:', error)
-        updateStatus('error', `STT error: ${(error as Error)?.message ?? error}`)
-      },
+    const result = await bridge.createStartUpPageContainer(
+      new CreateStartUpPageContainer({
+        containerTotalNum: 1,
+        textObject: [mainText],
+      }),
     )
 
-    await display.setMicrophoneEnabled(true)
-    updateStatus('listening', 'Microphone live. Voice is primary; double-tap is fallback.')
+    if (result !== 0) {
+      console.error('startup page failed:', result)
+    }
 
-    display.subscribeEvents(event => {
+    await restoreSessionState()
+
+    // Start the recognizer, THEN turn the glasses mic on so PCM has somewhere
+    // to go. If the STT socket fails (e.g. bad/missing key), surface it but
+    // keep the app usable via temple-tap.
+    try {
+      sttClient = startVoice()
+      await bridge.audioControl(true)
+      setTranscript('', 'Recognizer active')
+      updateStatus('listening', 'Mic live on glasses. Say "next" / "back" / "note".')
+    } catch (voiceError) {
+      console.error('Voice startup failed:', voiceError)
+      updateStatus('error', (voiceError as Error)?.message ?? 'Voice startup failed. Temple-tap still advances steps.')
+    }
+
+    bridge.onEvenHubEvent(event => {
+      // 1) Audio frames from the glasses mic → STT. PCM s16le 16kHz mono.
       const pcm = event.audioEvent?.audioPcm
       if (pcm) {
-        stt?.sendPcm(pcm)
+        sttClient?.sendPcm(pcm)
       }
 
-      const sysType = event.sysEvent?.eventType ?? null
-      const textType = event.textEvent?.eventType ?? null
-
-      if (isDoubleTap(sysType) || isDoubleTap(textType)) {
-        void advanceStep(1, 'temple double-tap')
-        return
+      // 2) Temple input on the protocol container.
+      const textEvent = event.textEvent
+      if (textEvent?.containerID === GLASSES_CONTAINER_ID) {
+        switch (textEvent.eventType) {
+          case OsEventTypeList.CLICK_EVENT:
+          case undefined:
+            void advanceStep(1, 'temple click')
+            break
+          case OsEventTypeList.DOUBLE_CLICK_EVENT:
+            void bridge?.shutDownPageContainer(GLASSES_CONTAINER_ID)
+            break
+          default:
+            break
+        }
       }
 
-      if (isSystemExit(sysType)) {
+      // 3) Lifecycle.
+      const sysType = event.sysEvent?.eventType
+      if (
+        sysType === OsEventTypeList.SYSTEM_EXIT_EVENT ||
+        sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT
+      ) {
         void cleanup()
       }
     })
@@ -449,8 +561,10 @@ async function cleanup() {
   }
 
   cleanedUp = true
-  stt?.close()
-  await display?.shutdown()
+  sttClient?.close()
+  if (bridge) {
+    await bridge.audioControl(false)
+  }
 }
 
 window.addEventListener('beforeunload', () => {

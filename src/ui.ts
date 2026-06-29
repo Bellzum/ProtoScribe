@@ -1,13 +1,9 @@
-import { getBackendBaseUrl } from './lib/api'
 import { APP_NAME } from './lib/config'
-import type { AppState, SessionRecord, StatusKind } from './lib/types'
+import type { AppState, ObservationRecord, StatusKind } from './lib/types'
 
 type UiActions = {
   onStartSession(): void
   onEndSession(): void
-  onRefreshSessions(): void
-  onSelectSession(sessionId: string): void
-  onToggleConfirmation(enabled: boolean): void
   onRepeatCurrentStep(): void
 }
 
@@ -33,19 +29,21 @@ function formatTimestamp(value: string | null) {
 }
 
 function summarizeCurrentStep(state: AppState) {
-  if (!state.protocol) {
-    return null
-  }
-
-  const stepIndex = state.currentSession?.current_step_index ?? 1
+  const stepIndex = state.currentSession.currentStepIndex
   return state.protocol.steps.find(step => step.index === stepIndex) ?? state.protocol.steps[0]
 }
 
-function groupTimeline(session: SessionRecord) {
-  return session.step_events.map(event => {
-    const notes = session.observations.filter(note => note.step_index === event.step_index)
-    return { event, notes }
-  })
+function renderObservation(note: ObservationRecord) {
+  return `
+    <article class="timeline-entry">
+      <div class="timeline-head">
+        <strong>Step ${note.stepIndex} · ${escapeHtml(note.stepTitle)}</strong>
+        <span>Observation</span>
+      </div>
+      <div class="timeline-meta">${escapeHtml(formatTimestamp(note.timestamp))}</div>
+      <p>${escapeHtml(note.transcript)}</p>
+    </article>
+  `
 }
 
 function renderStatusChip(kind: StatusKind, text: string) {
@@ -55,9 +53,9 @@ function renderStatusChip(kind: StatusKind, text: string) {
 function renderCurrentSession(state: AppState) {
   const step = summarizeCurrentStep(state)
   const session = state.currentSession
-  const noteCount = session?.observations.length ?? 0
+  const noteCount = session.observations.length
 
-  if (!state.protocol || !step) {
+  if (!step) {
     return `
       <section class="card card-live">
         <div class="card-label">Live Session</div>
@@ -77,18 +75,14 @@ function renderCurrentSession(state: AppState) {
       <p class="step-action">${escapeHtml(step.action)}</p>
       <div class="metrics">
         <div class="metric"><span>Protocol</span><strong>${escapeHtml(state.protocol.name)}</strong></div>
-        <div class="metric"><span>Status</span><strong>${session ? session.status : 'idle'}</strong></div>
+        <div class="metric"><span>Status</span><strong>${session.active ? 'active' : 'idle'}</strong></div>
         <div class="metric"><span>Notes</span><strong>${noteCount}</strong></div>
       </div>
       <div class="button-row">
-        <button data-action="start-session" ${session?.status === 'active' ? 'disabled' : ''}>Start Session</button>
-        <button data-action="end-session" class="ghost" ${session?.status === 'active' ? '' : 'disabled'}>End Session</button>
-        <button data-action="repeat-step" class="ghost" ${session?.status === 'active' ? '' : 'disabled'}>Repeat Step</button>
+        <button data-action="start-session" ${session.active ? 'disabled' : ''}>Start Session</button>
+        <button data-action="end-session" class="ghost" ${session.active ? '' : 'disabled'}>End Session</button>
+        <button data-action="repeat-step" class="ghost" ${session.active ? '' : 'disabled'}>Repeat Step</button>
       </div>
-      <label class="toggle">
-        <input type="checkbox" data-action="toggle-confirmation" ${state.confirmationRequired ? 'checked' : ''} />
-        <span>Require spoken confirmation before advancing</span>
-      </label>
       <div class="command-grid">
         <span>start session</span>
         <span>end session</span>
@@ -97,7 +91,7 @@ function renderCurrentSession(state: AppState) {
         <span>go to step N</span>
         <span>note &lt;text&gt;</span>
         <span>read last note</span>
-        <span>done / flag</span>
+        <span>Temple tap = next</span>
       </div>
     </section>
   `
@@ -109,85 +103,35 @@ function renderTranscriptPane() {
       <div class="card-label">Speech Feed</div>
       <h3>Latest utterance</h3>
       <p class="transcript-block">${escapeHtml(lastTranscript || 'No final transcript yet.')}</p>
-      <h3>Interim capture</h3>
-      <p class="transcript-block transcript-interim">${escapeHtml(lastInterim || 'Waiting for speech...')}</p>
+      <h3>Recognizer state</h3>
+      <p class="transcript-block transcript-interim">${escapeHtml(lastInterim || 'Web Speech API standby.')}</p>
     </section>
   `
 }
 
-function renderSessionsList(state: AppState) {
-  if (!state.recentSessions.length) {
-    return '<p class="muted">No sessions recorded yet.</p>'
-  }
-
-  return state.recentSessions
-    .map(session => {
-      const isSelected = session.session_id === state.selectedSessionId
-      return `
-        <button class="session-item ${isSelected ? 'selected' : ''}" data-action="select-session" data-session-id="${escapeHtml(session.session_id)}">
-          <strong>${escapeHtml(session.protocol_name)}</strong>
-          <span>${escapeHtml(session.session_id)}</span>
-          <span>${escapeHtml(formatTimestamp(session.started_at))}</span>
-        </button>
-      `
-    })
-    .join('')
-}
-
-function renderSelectedSession(state: AppState) {
-  const session = state.selectedSession
-  if (!session) {
-    return '<p class="muted">Select a session to inspect its timeline and exports.</p>'
-  }
-
-  const exportBase = getBackendBaseUrl()
-  const timeline = groupTimeline(session)
-    .map(({ event, notes }) => {
-      const notesMarkup = notes.length
-        ? notes
-            .map(
-              note => `
-                <div class="note-entry">
-                  <span>${escapeHtml(formatTimestamp(note.timestamp))}</span>
-                  <p>${escapeHtml(note.transcript)}</p>
-                </div>
-              `,
-            )
-            .join('')
-        : '<p class="muted compact">No notes on this step event.</p>'
-
-      return `
-        <article class="timeline-entry">
-          <div class="timeline-head">
-            <strong>Step ${event.step_index} · ${escapeHtml(event.step_title)}</strong>
-            <span>${escapeHtml(event.event_type)}</span>
-          </div>
-          <div class="timeline-meta">${escapeHtml(formatTimestamp(event.timestamp))}${event.detail ? ` · ${escapeHtml(event.detail)}` : ''}</div>
-          ${notesMarkup}
-        </article>
-      `
-    })
-    .join('')
+function renderSessionSummary(state: AppState) {
+  const session = state.currentSession
+  const notes = [...session.observations].reverse()
+  const notesMarkup = notes.length
+    ? notes.map(note => renderObservation(note)).join('')
+    : '<p class="muted">No notes captured yet.</p>'
 
   return `
     <div class="session-detail">
       <div class="detail-toolbar">
         <div>
-          <h3>${escapeHtml(session.protocol_name)}</h3>
-          <p class="muted">${escapeHtml(session.session_id)}</p>
-        </div>
-        <div class="button-row">
-          <a class="export-link" href="${exportBase}/api/session/${encodeURIComponent(session.session_id)}/export/json" target="_blank" rel="noreferrer">Export JSON</a>
-          <a class="export-link" href="${exportBase}/api/session/${encodeURIComponent(session.session_id)}/export/pdf" target="_blank" rel="noreferrer">Export PDF</a>
+          <h3>${escapeHtml(state.protocol.name)}</h3>
+          <p class="muted">Session state lives on the phone and Even local storage.</p>
         </div>
       </div>
       <div class="detail-summary">
-        <span>Started: ${escapeHtml(formatTimestamp(session.started_at))}</span>
-        <span>Ended: ${escapeHtml(formatTimestamp(session.ended_at))}</span>
+        <span>Started: ${escapeHtml(formatTimestamp(session.startedAt))}</span>
+        <span>Ended: ${escapeHtml(formatTimestamp(session.endedAt))}</span>
+        <span>Current step: ${session.currentStepIndex}/${state.protocol.steps.length}</span>
         <span>Notes: ${session.observations.length}</span>
       </div>
       <div class="timeline">
-        ${timeline || '<p class="muted">No timeline entries yet.</p>'}
+        ${notesMarkup}
       </div>
     </div>
   `
@@ -208,18 +152,7 @@ export function mountUi(uiActions: UiActions) {
     const action = actionTarget.dataset.action
     if (action === 'start-session') actions.onStartSession()
     if (action === 'end-session') actions.onEndSession()
-    if (action === 'refresh-sessions') actions.onRefreshSessions()
     if (action === 'repeat-step') actions.onRepeatCurrentStep()
-    if (action === 'select-session' && actionTarget.dataset.sessionId) {
-      actions.onSelectSession(actionTarget.dataset.sessionId)
-    }
-  })
-
-  appRoot.addEventListener('change', event => {
-    const target = event.target as HTMLInputElement | null
-    if (target?.dataset.action === 'toggle-confirmation') {
-      actions.onToggleConfirmation(target.checked)
-    }
   })
 }
 
@@ -234,7 +167,7 @@ export function renderUi(state: AppState) {
         </div>
         <div class="hero-status">
           ${renderStatusChip(state.statusKind, state.statusText)}
-          <div class="provider-chip">STT: ${escapeHtml(state.providerLabel)}</div>
+          <div class="provider-chip">Voice: ${escapeHtml(state.providerLabel)}</div>
         </div>
       </section>
       <section class="layout">
@@ -246,21 +179,16 @@ export function renderUi(state: AppState) {
           <section class="card">
             <div class="card-headline">
               <div>
-                <div class="card-label">Review & Export</div>
-                <h2>Session archive</h2>
+                <div class="card-label">Local Session</div>
+                <h2>Notes and summary</h2>
               </div>
-              <button data-action="refresh-sessions" class="ghost">Refresh</button>
             </div>
-            <div class="session-list">${renderSessionsList(state)}</div>
-          </section>
-          <section class="card card-review">
-            <div class="card-label">Audit View</div>
-            ${renderSelectedSession(state)}
+            ${renderSessionSummary(state)}
           </section>
         </div>
       </section>
       <footer class="footer">
-        Double-tap the temple advances to the next step if voice capture fails. All protocol state lives on the phone/server, not on the glasses.
+        Double-tap the temple advances to the next step if voice capture fails. All protocol state stays on the phone and Even local storage, with no laptop backend required.
       </footer>
     </main>
   `
@@ -387,7 +315,7 @@ function injectStyles() {
     }
     .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
     .button-row { display: flex; gap: 12px; flex-wrap: wrap; }
-    button, .export-link {
+    button {
       border: 1px solid rgba(212,255,106,0.36);
       border-radius: 999px;
       padding: 10px 14px;
@@ -397,24 +325,16 @@ function injectStyles() {
       text-decoration: none;
       transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
     }
-    button:hover, .export-link:hover { transform: translateY(-1px); background: rgba(212,255,106,0.14); }
+    button:hover { transform: translateY(-1px); background: rgba(212,255,106,0.14); }
     button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
     .ghost { background: transparent; border-color: var(--line); }
-    .toggle {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      color: var(--muted);
-      margin-top: 16px;
-    }
-    .toggle input { accent-color: var(--accent); }
     .command-grid {
       margin-top: 18px;
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
-    .command-grid span, .transcript-block, .session-item, .timeline-entry, .note-entry {
+    .command-grid span, .transcript-block, .timeline-entry {
       border: 1px solid var(--line);
       background: rgba(255,255,255,0.02);
       border-radius: 16px;
@@ -422,18 +342,7 @@ function injectStyles() {
     .command-grid span { padding: 12px; color: var(--muted); }
     .transcript-block { padding: 16px; margin-top: 8px; min-height: 56px; }
     .transcript-interim { color: var(--muted); }
-    .session-list, .timeline { display: flex; flex-direction: column; gap: 12px; }
-    .session-item {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 6px;
-      padding: 14px;
-      text-align: left;
-      width: 100%;
-      border-radius: 18px;
-    }
-    .session-item.selected { border-color: rgba(212,255,106,0.52); background: rgba(212,255,106,0.08); }
+    .timeline { display: flex; flex-direction: column; gap: 12px; }
     .session-detail { display: flex; flex-direction: column; gap: 16px; }
     .detail-toolbar {
       display: flex;
@@ -447,7 +356,7 @@ function injectStyles() {
       gap: 10px;
       color: var(--muted);
     }
-    .timeline-entry, .note-entry { padding: 14px; }
+    .timeline-entry { padding: 14px; }
     .timeline-head {
       display: flex;
       justify-content: space-between;
@@ -455,9 +364,6 @@ function injectStyles() {
       margin-bottom: 6px;
     }
     .timeline-meta, .muted { color: var(--muted); }
-    .muted.compact { margin-top: 10px; }
-    .note-entry { margin-top: 10px; }
-    .note-entry span { display: block; color: var(--muted); margin-bottom: 8px; }
     .footer { border-radius: 20px; padding: 16px 20px; color: var(--muted); line-height: 1.5; }
     @media (max-width: 980px) {
       body { padding: 16px; }

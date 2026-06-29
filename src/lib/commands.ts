@@ -15,8 +15,6 @@ const NUMBER_WORDS = new Map<string, number>([
   ['twelve', 12],
 ])
 
-const FLAG_WORDS = ['contaminated', 'spill', 'spilled', 'broken', 'wrong']
-
 function normalize(text: string) {
   return text
     .trim()
@@ -83,22 +81,6 @@ export function parseVoiceCommand(input: string): VoiceCommand {
     return { kind: 'read_last_note', rawText }
   }
 
-  if (normalized === 'done' || normalized === 'confirm') {
-    return { kind: 'confirm', rawText }
-  }
-
-  const flagMatch = normalized.match(/^flag\b[:\s-]*(.*)$/)
-  if (flagMatch) {
-    const detail = flagMatch[1].trim()
-    const flagText = detail || 'flagged'
-    return { kind: 'flag', rawText, flagText }
-  }
-
-  const detectedWord = FLAG_WORDS.find(word => normalized === word || normalized.startsWith(`${word} `))
-  if (detectedWord) {
-    return { kind: 'flag', rawText, flagText: detectedWord }
-  }
-
   return { kind: 'unknown', rawText }
 }
 
@@ -120,16 +102,7 @@ export function describeCommand(command: VoiceCommand) {
       return `note saved: ${command.noteText ?? ''}`.trim()
     case 'read_last_note':
       return 'read last note'
-    case 'confirm':
-      return 'confirm step'
-    case 'flag':
-      return `flag step: ${command.flagText ?? 'flagged'}`
     default:
       return `unrecognized: ${command.rawText}`
   }
-}
-
-export function isWarningWord(text: string) {
-  const normalized = normalize(text)
-  return FLAG_WORDS.some(word => normalized === word || normalized.startsWith(`${word} `))
 }

@@ -26,11 +26,8 @@ describe('parseVoiceCommand', () => {
   })
 
   it('parses step confirmation and warnings', () => {
-    expect(parseVoiceCommand('done').kind).toBe('confirm')
-    expect(parseVoiceCommand('flag contaminated')).toMatchObject({
-      kind: 'flag',
-      flagText: 'contaminated',
-    })
-    expect(parseVoiceCommand('broken').kind).toBe('flag')
+    expect(parseVoiceCommand('read last note').kind).toBe('read_last_note')
+    expect(parseVoiceCommand('start session').kind).toBe('start_session')
+    expect(parseVoiceCommand('end session').kind).toBe('end_session')
   })
 })
